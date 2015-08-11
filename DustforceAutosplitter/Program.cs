@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Timers;
+using System.Xml;
 
 namespace DustforceAutosplitter {
-
   public class Autosplitter {
     private class SplitData {
       public SplitData() {
@@ -34,6 +34,16 @@ namespace DustforceAutosplitter {
     }
 
     public Autosplitter() {
+      XmlDocument configXml = new XmlDocument();
+      try {
+        configXml.Load("autosplitconfig.xml");
+        foreach (XmlNode node in configXml.DocumentElement.SelectNodes("/config/path")) {
+          tryPath(node.InnerText);
+        }
+      } catch (FileNotFoundException e) {
+        Console.WriteLine("No config file found; using only defaults");
+      }
+
       string homePath = (Environment.OSVersion.Platform == PlatformID.Unix ||
                          Environment.OSVersion.Platform == PlatformID.MacOSX)
                ? Environment.GetEnvironmentVariable("HOME")
@@ -47,7 +57,7 @@ namespace DustforceAutosplitter {
       if (progFiles != progFiles86) {
         tryPath(progFiles + "\\Steam\\steamapps\\common\\Dustforce\\user");
       }
-
+      
       timer = new Timer();
       timer.Interval = 10000;
       timer.AutoReset = true;
@@ -65,12 +75,16 @@ namespace DustforceAutosplitter {
     }
 
     private void tryPath(String path) {
+      if (!watchers.ContainsKey(path)) {
+        Console.WriteLine("Checking " + path);
+      }
+
       splitData[path] = new SplitData();
       if (!File.Exists(path + "\\stats0")) {
         watchers[path] = null;
         return;
       }
-      Console.WriteLine("Watching path " + path);
+      Console.WriteLine("Start watch path " + path);
 
       FileSystemWatcher watcher = new FileSystemWatcher();
       watcher.Path = path;
@@ -128,7 +142,7 @@ namespace DustforceAutosplitter {
   class Program {
     static void Main(string[] args) {
       Autosplitter x = new Autosplitter();
-      Console.WriteLine("Press any key to close");
+      Console.WriteLine("Press enter to close");
       Console.Read();
     }
   }
