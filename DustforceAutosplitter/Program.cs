@@ -7,140 +7,184 @@ using System.Xml;
 
 namespace DustforceAutosplitter {
   public class Autosplitter {
-    private class SplitData {
-      public SplitData() {
-        timer = new Timer();
-        timer.Interval = 45;
-        timer.AutoReset = false;
+    private class PathWatcher {
+      private const int PULSE_WINDOW_MS = 45;
+
+      private Autosplitter autosplitter;
+      private String path;
+
+      private int pulses;
+      private DateTime lastPulseTime;
+      private Timer splitTimer;
+      private FileSystemWatcher fsWatcher;
+
+      private readonly object syncLock = new object();
+
+      public PathWatcher(Autosplitter autosplitter, String path) {
+        this.autosplitter = autosplitter;
+        this.path = path;
+
+        splitTimer = new Timer();
+        splitTimer.Interval = 45;
+        splitTimer.AutoReset = false;
+        splitTimer.Elapsed += (Object source, System.Timers.ElapsedEventArgs e) => {
+          lock (syncLock) {
+            if (2 <= pulses && pulses <= 4) {
+              /* Finishing a level generates between 2 and 4 pulses. */
+              autosplitter.doSplit();
+            }
+          }
+        };
         pulses = 0;
-        lastTime = 0;
+        lastPulseTime = DateTime.Now;
+        fsWatcher = null;
       }
 
-      public Timer timer;
-      public int pulses;
-      public long lastTime;
+      public void startWatching() {
+        lock (syncLock) {
+          if (fsWatcher != null || !File.Exists(path + "\\stats0")) {
+            return;
+          }
+          Console.WriteLine("Start watch path " + path);
+
+          /* Generate pulses based on changes to the stats0 file. */
+          fsWatcher = new FileSystemWatcher();
+          fsWatcher.Path = path;
+          fsWatcher.Changed += new FileSystemEventHandler(
+            (object source, FileSystemEventArgs eargs) => {
+              if (eargs.Name == "stats0" &&
+                  eargs.ChangeType == WatcherChangeTypes.Changed) {
+                pulse();
+              }
+            });
+
+          /* Test when we lose the monitored directory so we can later attempt
+           * to begin watching again. */
+          fsWatcher.Error += (object source, ErrorEventArgs e) => {
+            Console.WriteLine("Lost directory " + path);
+            lock (syncLock) {
+              fsWatcher = null;
+            }
+          };
+          fsWatcher.EnableRaisingEvents = true;
+        }
+      }
+
+      /* This method is called every time a change event happens to stats0.
+       * It adjusts the current pulse count subject to the pulse window and
+       * schedules/unschedules a split based on the current pulse count.
+       */
+      private void pulse() {
+        DateTime now = DateTime.Now;
+        lock (syncLock) {
+          if ((now - lastPulseTime).TotalMilliseconds > PULSE_WINDOW_MS) {
+            /* The last pulse was long enough ago we should restart the pulse count. */
+            pulses = 1;
+          } else {
+            pulses++;
+            if (pulses == 2) {
+              /* Finishing a level generates at least 2 pulses. */
+              splitTimer.Start();
+            } else if (pulses == 5) {
+              /* Finishing a level generates no more than 4 pulses. */
+              splitTimer.Stop();
+            }
+          }
+          lastPulseTime = now;
+        }
+      }
     }
 
-    private Timer timer;
-    private Dictionary<String, FileSystemWatcher> watchers = new Dictionary<string, FileSystemWatcher>();
-    private Dictionary<String, SplitData> splitData = new Dictionary<string, SplitData>();
+    private const int VK_PRIOR = 0x21; /* Page Up */
+    private int splitVKKey = VK_PRIOR;
 
-    [DllImport("user32.dll")]
-    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
-
-    private static long getTimestamp() {
-      var timeSpan = (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0));
-      return (long)timeSpan.TotalMilliseconds;
-    }
+    private Timer rewatchTimer;
+    private Dictionary<String, PathWatcher> watchers = new Dictionary<string, PathWatcher>();
 
     public Autosplitter() {
+      /* Attempt to load the configuration file. */
       XmlDocument configXml = new XmlDocument();
       try {
         configXml.Load("autosplitconfig.xml");
+
+        /* Start monitoring any paths from /config/path elements in the config. */
         foreach (XmlNode node in configXml.DocumentElement.SelectNodes("/config/path")) {
-          tryPath(node.InnerText);
+          initWatcher(node.InnerText);
+        }
+
+        /* Check for a custom split key. */
+        XmlNode splitkeyNode = configXml.DocumentElement.SelectSingleNode("/config/splitkey");
+        if (splitkeyNode != null) {
+          if (int.TryParse(splitkeyNode.InnerText, out splitVKKey)) {
+            Console.WriteLine("Using VK Key " + splitVKKey + " for splitting");
+          } else {
+            Console.WriteLine("Could not parse split key");
+          }
         }
       } catch (FileNotFoundException e) {
         Console.WriteLine("No config file found; using only defaults");
       }
 
+      /* Start monitoring the common Dustforce user paths. */
       string homePath = (Environment.OSVersion.Platform == PlatformID.Unix ||
                          Environment.OSVersion.Platform == PlatformID.MacOSX)
                ? Environment.GetEnvironmentVariable("HOME")
                : Environment.ExpandEnvironmentVariables("%HOMEDRIVE%%HOMEPATH%");
-      tryPath(homePath + "\\AppData\\Roaming\\Dustforce\\user");
+      initWatcher(homePath + "\\AppData\\Roaming\\Dustforce\\user");
 
       string progFiles86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-      tryPath(progFiles86 + "\\Steam\\steamapps\\common\\Dustforce\\user");
+      initWatcher(progFiles86 + "\\Steam\\steamapps\\common\\Dustforce\\user");
 
       string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
       if (progFiles != progFiles86) {
-        tryPath(progFiles + "\\Steam\\steamapps\\common\\Dustforce\\user");
+        initWatcher(progFiles + "\\Steam\\steamapps\\common\\Dustforce\\user");
       }
-      
-      timer = new Timer();
-      timer.Interval = 10000;
-      timer.AutoReset = true;
-      timer.Elapsed += (Object source, System.Timers.ElapsedEventArgs e) => {
+
+      /* Create an additional timer that attempts to restart monitoring any folders
+       * that didn't exist on startup or were deleted after startup.  This is needed
+       * so if the user resets their save the autosplitter doesn't need to be
+       * restarted.
+       */
+      rewatchTimer = new Timer();
+      rewatchTimer.Interval = 10000;
+      rewatchTimer.AutoReset = true;
+      rewatchTimer.Elapsed += (Object source, System.Timers.ElapsedEventArgs e) => {
         lock(watchers) {
-          List<String> keys = new List<String>(watchers.Keys);
-          foreach (String path in keys) {
-            if (watchers[path] == null) {
-              tryPath(path);
-            }
+          /* Attempt to start monitoring all paths we know about that aren't already
+           * being monitored.
+           */
+          foreach (PathWatcher watcher in watchers.Values) {
+            watcher.startWatching();
           }
         }
       };
-      timer.Enabled = true;
+      rewatchTimer.Enabled = true;
     }
 
-    private void tryPath(String path) {
-      if (!watchers.ContainsKey(path)) {
-        Console.WriteLine("Checking " + path);
-      }
-
-      splitData[path] = new SplitData();
-      if (!File.Exists(path + "\\stats0")) {
-        watchers[path] = null;
+    private void initWatcher(String path) {
+      if (watchers.ContainsKey(path)) {
         return;
       }
-      Console.WriteLine("Start watch path " + path);
 
-      FileSystemWatcher watcher = new FileSystemWatcher();
-      watcher.Path = path;
-      watcher.Changed += new FileSystemEventHandler(
-        (object source, FileSystemEventArgs eargs) => {
-          Console.WriteLine(eargs.Name);
-          if (eargs.Name == "stats0" &&
-              eargs.ChangeType == WatcherChangeTypes.Changed) {
-            pulseSplit(path);
-          }
-        });
-      watcher.Error += (object source, ErrorEventArgs e) => {
-        Console.WriteLine("Lost directory " + path);
-        lock(watchers) {
-          watchers[path] = null;
-        }
-      };
-      watcher.EnableRaisingEvents = true;
-      watchers[path] = watcher;
+      Console.WriteLine("Adding " + path + " to watch list");
+      watchers[path] = new PathWatcher(this, path);
+      watchers[path].startWatching();
     }
 
-    private void pulseSplit(String path) {
-      SplitData data = splitData[path];
-      long now = getTimestamp();
-      lock (data) {
-        if (now - data.lastTime > 45) {
-          data.pulses = 1;
-        } else {
-          data.pulses++;
-          if (data.pulses == 2) {
-            data.timer.Elapsed += (Object source, System.Timers.ElapsedEventArgs e) => {
-              lock (data) {
-                if (2 <= data.pulses && data.pulses <= 4) {
-                  doSplit();
-                }
-              }
-            };
-            data.timer.Start();
-          } else if (data.pulses == 5) {
-            data.timer.Stop();
-          }
-        }
-        data.lastTime = now;
-      }
-    }
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
 
     private void doSplit() {
-      int VK_PRIOR = 0x21;
-      keybd_event((byte)VK_PRIOR, 0, 1, 0);
-      keybd_event((byte)VK_PRIOR, 0, 3, 0);
+      keybd_event((byte)splitVKKey, 0, 3, 0);
+      keybd_event((byte)splitVKKey, 0, 1, 0);
       Console.WriteLine("Split");
+     
     }
   }
 
   class Program {
     static void Main(string[] args) {
+      /* Initialize the autosplitter and wait until the user exits. */
       Autosplitter x = new Autosplitter();
       Console.WriteLine("Press enter to close");
       Console.Read();
