@@ -49,11 +49,18 @@ namespace DustforceAutosplitter {
           /* Generate pulses based on changes to the stats0 file. */
           fsWatcher = new FileSystemWatcher();
           fsWatcher.Path = path;
+        
           fsWatcher.Changed += new FileSystemEventHandler(
             (object source, FileSystemEventArgs eargs) => {
               Console.WriteLine(eargs.Name);
-              if (eargs.Name == "stats0" &&
-                  eargs.ChangeType == WatcherChangeTypes.Changed) {
+              if (eargs.Name == "stats0") {
+                pulse();
+              }
+            });
+          fsWatcher.Created += new FileSystemEventHandler(
+            (object source, FileSystemEventArgs eargs) => {
+              Console.WriteLine("Create " + eargs.Name);
+              if (eargs.Name == "stats0") {
                 pulse();
               }
             });
