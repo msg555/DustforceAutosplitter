@@ -8,7 +8,6 @@ using System.Xml;
 namespace DustforceAutosplitter {
   public class Autosplitter {
     private class PathWatcher {
-      private const int PULSE_WINDOW_MS = 45;
 
       private Autosplitter autosplitter;
       private String path;
@@ -25,12 +24,12 @@ namespace DustforceAutosplitter {
         this.path = path;
 
         splitTimer = new Timer();
-        splitTimer.Interval = 45;
+        splitTimer.Interval = autosplitter.pulseWindow;
         splitTimer.AutoReset = false;
         splitTimer.Elapsed += (Object source, System.Timers.ElapsedEventArgs e) => {
           lock (syncLock) {
-            if (2 <= pulses && pulses <= 4) {
-              /* Finishing a level generates between 2 and 4 pulses. */
+            if (pulses == 4) {
+              /* Finishing a level generates 4 pulses. */
               autosplitter.doSplit();
             }
           }
@@ -52,6 +51,7 @@ namespace DustforceAutosplitter {
           fsWatcher.Path = path;
           fsWatcher.Changed += new FileSystemEventHandler(
             (object source, FileSystemEventArgs eargs) => {
+              Console.WriteLine(eargs.Name);
               if (eargs.Name == "stats0" &&
                   eargs.ChangeType == WatcherChangeTypes.Changed) {
                 pulse();
@@ -77,23 +77,25 @@ namespace DustforceAutosplitter {
       private void pulse() {
         DateTime now = DateTime.Now;
         lock (syncLock) {
-          if ((now - lastPulseTime).TotalMilliseconds > PULSE_WINDOW_MS) {
+          if ((now - lastPulseTime).TotalMilliseconds > autosplitter.pulseWindow) {
             /* The last pulse was long enough ago we should restart the pulse count. */
             pulses = 1;
           } else {
             pulses++;
-            if (pulses == 2) {
-              /* Finishing a level generates at least 2 pulses. */
+
+            splitTimer.Stop();
+            if (pulses == 4) {
+              /* Finishing a level generates 4 pulses. */
               splitTimer.Start();
-            } else if (pulses == 5) {
-              /* Finishing a level generates no more than 4 pulses. */
-              splitTimer.Stop();
             }
           }
           lastPulseTime = now;
         }
       }
     }
+
+    private const int DEFAULT_PULSE_WINDOW_MS = 100;
+    private int pulseWindow = DEFAULT_PULSE_WINDOW_MS;
 
     private const int VK_PRIOR = 0x21; /* Page Up */
     private int splitVKKey = VK_PRIOR;
@@ -121,7 +123,17 @@ namespace DustforceAutosplitter {
             Console.WriteLine("Could not parse split key");
           }
         }
-      } catch (FileNotFoundException e) {
+
+        /* Check for a custom pulse window. */
+        XmlNode pulseWindowNode = configXml.DocumentElement.SelectSingleNode("/config/pulsewindow");
+        if (pulseWindowNode != null) {
+          if (int.TryParse(pulseWindowNode.InnerText, out pulseWindow)) {
+            Console.WriteLine("Using pulse window " + pulseWindow);
+          } else {
+            Console.WriteLine("Could not parse pulse window");
+          }
+        }
+      } catch (FileNotFoundException) {
         Console.WriteLine("No config file found; using only defaults");
       }
 
@@ -178,7 +190,6 @@ namespace DustforceAutosplitter {
       keybd_event((byte)splitVKKey, 0, 3, 0);
       keybd_event((byte)splitVKKey, 0, 1, 0);
       Console.WriteLine("Split");
-     
     }
   }
 
