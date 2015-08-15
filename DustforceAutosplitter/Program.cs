@@ -28,7 +28,7 @@ namespace DustforceAutosplitter {
         splitTimer.AutoReset = false;
         splitTimer.Elapsed += (Object source, System.Timers.ElapsedEventArgs e) => {
           lock (syncLock) {
-            if (pulses == 4) {
+            if (2 <= pulses && pulses <= 4) {
               /* Finishing a level generates 4 pulses. */
               autosplitter.doSplit();
             }
@@ -91,7 +91,7 @@ namespace DustforceAutosplitter {
             pulses++;
 
             splitTimer.Stop();
-            if (pulses == 4) {
+            if (2 <= pulses && pulses <= 4) {
               /* Finishing a level generates 4 pulses. */
               splitTimer.Start();
             }
@@ -194,8 +194,8 @@ namespace DustforceAutosplitter {
     public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
 
     private void doSplit() {
-      keybd_event((byte)splitVKKey, 0, 3, 0);
       keybd_event((byte)splitVKKey, 0, 1, 0);
+      keybd_event((byte)splitVKKey, 0, 3, 0);
       Console.WriteLine("Split");
     }
   }
